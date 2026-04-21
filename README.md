@@ -18,9 +18,10 @@ Snaga is an AI coding agent built in Rust that can **create its own tools at run
 
 The agent operates with 40+ native tools and unlimited WASM tools created at runtime, multi-agent orchestration, semantic code search, enhanced memory, and a distributed bridge mode for clustering machines. It runs as a single 18MB binary with <100ms startup and ~30MB memory footprint.
 
-## Install Dev Version
+## Install
 ```
-curl -fsSL https://raw.githubusercontent.com/chabanov/snaga-releases/main/install.sh | bash
+# One-line installer (auto-detects platform)
+curl -fsSL https://snaga.ai/install.sh | bash
 ```
 
 ## Why Snaga
