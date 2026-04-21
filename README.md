@@ -20,7 +20,6 @@ The agent operates with 40+ native tools and unlimited WASM tools created at run
 
 ## Install
 ```
-# One-line installer (auto-detects platform)
 curl -fsSL https://snaga.ai/install.sh | bash
 ```
 
