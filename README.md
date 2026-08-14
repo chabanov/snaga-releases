@@ -6,9 +6,9 @@
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.8.0-green.svg)](https://github.com/chabanov/snaga/releases)
+[![Version](https://img.shields.io/github/v/release/chabanov/snaga-releases?label=Version&color=green)](https://github.com/chabanov/snaga-releases/releases)
 
-[Installation](#installation) · [Getting Started](#getting-started) · [Architecture](#architecture) · [Tools](#tools) · [Slash Commands](#slash-commands) · [Skills](#skills) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
+[Installation](#installation) · [Getting Started](#getting-started) · [Architecture](#architecture) · [Tools](#tools) · [Slash Commands](#slash-commands) · [Skills](#skills) · [Security](https://github.com/chabanov/snaga/blob/main/SECURITY.md) · [Changelog](https://github.com/chabanov/snaga/blob/main/CHANGELOG.md)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 Snaga is an AI coding agent built in Rust that can **create its own tools at runtime**. It compiles Rust code to WebAssembly, registers it instantly, and runs it in a capability-based sandbox — no redeployment, no restarts.
 
-The agent operates with 40+ native tools and unlimited WASM tools created at runtime, multi-agent orchestration, semantic code search, enhanced memory, and a distributed bridge mode for clustering machines. It runs as a single 18MB binary with <100ms startup and ~30MB memory footprint.
+The agent operates with a lean native kernel (~25 tools), a 14-tool SPEC registry for community tools, and unlimited runtime-compiled WASM tools — plus multi-agent orchestration, enhanced memory, and a distributed bridge mode for clustering machines. Heavier domain tools (docker, database, LSP, test_runner, …) were spun out in the v0.9.9 slim-kernel cleanup and return as installable SPECs. It runs as a single ~18MB binary with <100ms startup and ~30MB memory footprint.
 
 ## Install
 ```
@@ -59,7 +59,7 @@ Agent decides it needs a new tool
 Tools run in a 4-layer sandbox:
 1. **Compilation isolation** — each tool built in its own `wasm32-wasip2` workspace
 2. **Component validation** — wasmtime verifies WIT world implementation
-3. **Capability-based access** — bitflags per tool (`file_read`, `http_get`, `kv_store`, `logging`, `shell_exec`)
+3. **Capability-based access** — 21 bitflag capabilities per tool (10 core like `file_read`/`http_post`/`shell_exec` + 11 hardware/embedded like `gpio`/`i2c`/`mqtt`)
 4. **Runtime limits** — epoch-interruption CPU budget, pooling-allocator memory cap, shell-injection regex
 
 ### Multi-Agent Orchestration
@@ -233,11 +233,11 @@ Switch between read-only planning and full execution modes:
 /mode act     # Full execution mode (default)
 ```
 
-Plan mode allows only read-only tools (`read_file`, `grep`, `glob`, `git_status`, `code_search`, `web_search`, etc.) and `mcp_*` tools. Write tools (`edit_file`, `write_file`, `patch`, `shell`, `git_commit`, etc.) are blocked. This lets the agent safely explore and plan without risk of unintended changes.
+Plan mode allows only read-only tools (`read_file`, `grep`, `glob`, `git_status`, `web_search`, etc.) and `mcp_*` tools whose verb is read-like (`search_`/`read_`/`get_`/`list_`/…). Write tools (`edit_file`, `write_file`, `shell`, etc.) are blocked. This lets the agent safely explore and plan without risk of unintended changes.
 
 ### Auto-Checkpoints
 
-Before every destructive tool call (`edit_file`, `write_file`, `patch`, `shell`, `git_commit`, `git_reset`, `git_checkout`), Snaga automatically creates a git stash checkpoint. Up to 20 checkpoints per session are retained.
+Before every destructive tool call (any tool whose `is_destructive()` is true — `edit_file`, `write_file`, `shell`, …), Snaga automatically creates a git stash checkpoint. Up to 20 checkpoints per session are retained.
 
 ```
 /rewind       # Undo the last action by restoring the most recent checkpoint
@@ -283,7 +283,7 @@ cargo install --path crates/snaga-cli --features browser
 snaga-cli          CLI + Bridge mode (interactive / daemon)
 snaga-core         Agent loop, tool registry (RwLock), skills, permissions,
                   memory, circuit breaker, teams, voice, indexing, config_loader
-snaga-tools        40+ native tools (impl Tool for ...)
+snaga-tools        ~25 native kernel tools (slim kernel; domain tools → SPECs)
 snaga-wasm         WASM Component Model runtime (wasmtime + WIT contracts)
 snaga-llm          LLM client layer (Stels, Ollama Cloud, OpenAI, Copilot, Together, LM Studio)
 snaga-mcp          Model Context Protocol client + server
@@ -300,49 +300,52 @@ snaga-browser      Browser automation (Chromium via Chrome DevTools Protocol)
 
 ## Tools
 
-### Native (40+)
+### Native Kernel (~25)
+
+The slim kernel keeps only the tools an agent needs on every run. Heavier
+domain tools (docker, database, LSP, test_runner, package, service,
+scheduler, …) were removed in the v0.9.9 cleanup and return as installable
+SPECs — see below.
 
 | Category | Tools |
 |----------|-------|
-| **Files** | `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `diff`, `diff_review`, `patch`, `undo` |
-| **Git** | `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_commit_message`, `git_branch`, `git_checkout`, `git_reset`, `git_pr`, `git_worktree` |
-| **Shell** | `shell` (with security: blocked patterns, injection detection, bg process tracking) |
-| **Docker** | `docker` (list, run, stop, start, rm, logs, exec, inspect, images) |
-| **Database** | `database` (SQLite, PostgreSQL, MySQL — parameterized queries) |
-| **System** | `service`, `package`, `scheduler` |
-| **Web** | `http_request`, `scrape`, `web_search` |
-| **AI** | `vision` (OCR, screenshots, charts), `code_search` (semantic), `delegate` (multi-agent), `svg_draw` |
-| **Project** | `task_manage`, `project_memory`, `background_task`, `context_gather` |
-| **Code** | `test_runner`, `linter_check`, `self_rebuild`, `skill_manage` |
+| **Files** | `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `diff_review`, `undo` |
+| **Git (read-only)** | `git_status`, `git_diff`, `git_log` |
+| **Shell + bg procs** | `shell` (risk-classified policy, injection detection), `bg_list`/`bg_logs`/`bg_wait`/`bg_kill` (detached processes, merged stdout+stderr log) |
+| **Web** | `http_request`, `scrape`, `web_search`, `read_pdf` |
+| **Media / AI** | `vision` (OCR, screenshots, charts), `voice_synthesize`, `voice_transcribe`, `image_generate` (UARP-backed) |
+| **Multi-agent** | `delegate` (delegated worker agents), `task_manage` (task board) |
+| **Monitors** | `monitor` (recurring monitors — `create`/`list`/`status`/`pause`/`resume`/`cancel`; command or prompt mode) |
 | **Browser** | `browser` (Chromium automation via CDP — requires `--features browser`) |
 
-### WASM Runtime Tools
+### SPEC Registry (14 tools)
 
-System tools migrated to WASM for sandboxed execution, plus user-created tools:
+The community flywheel — the agent itself can discover, install, use,
+publish, and share SPECs (signed tool packages) without a restart:
+
+| Group | Tools |
+|-------|-------|
+| **Read** | `spec_search`, `spec_info`, `spec_list`, `spec_validate`, `spec_update` |
+| **Author** | `spec_init`, `spec_build` |
+| **Mutate** (confirm) | `spec_install`, `spec_uninstall`, `spec_rollback`, `spec_publish`, `spec_yank`, `spec_unyank`, `spec_share` |
+
+Installed SPECs register their WASM tools into the live `ToolRegistry`
+via `RealWasmToolFactory` — no restart needed. Mutating `spec_*` tools
+require operator confirmation.
+
+### WASM Tools & Runtime
+
+The agent compiles Rust to `wasm32-wasip2` and registers the tool in the
+same session via `create_tool`. Community tools arrive through the SPEC
+registry (`spec_install`) and register the same way. Every WASM tool runs
+in the 4-layer sandbox (see above) with no ambient authority — every host
+call goes through a checked, capability-gated import.
 
 | Tool | Description |
 |------|-------------|
-| `sys_process` | Process management (list, kill, info, find, tree) |
-| `sys_network` | Network management (interfaces, ports, connections, DNS, ping, routes) |
-| `sys_disk` | Disk management (usage, list, info) |
-| `sys_user` | User/group management (whoami, users, groups, user_info, group_members) |
-| `sys_env` | Environment variables (get, set, unset, list, expand) |
-| `sys_logs` | System logs (system, app, search, kernel) |
-| `wifi_scan` | WiFi network scanning (macOS) |
-| `crypto_price` | Cryptocurrency prices (Coinbase API) |
+| `create_tool` | Generate a Rust scaffold, compile to `wasm32-wasip2`, validate the component, and register the tool at runtime |
 
-### WASM Management
-
-| Tool | Description |
-|------|-------------|
-| `create_tool` | Create a new WASM tool from Rust code |
-| `remove_tool` | Remove a WASM tool (files + live registry) |
-| `list_wasm_tools` | List installed WASM tools with capabilities |
-| `find_tool` | Search available WASM tools by keyword |
-| `activate_tool` | Load and activate a WASM tool |
-| `deactivate_tool` | Hide a WASM tool (stays on disk) |
-
-Created tools are stored in `.snaga/tools/`:
+Created/installed tools live in `.snaga/tools/`:
 ```
 .snaga/tools/
 ├── crypto_price.wasm          # Compiled WASM component
@@ -350,19 +353,32 @@ Created tools are stored in `.snaga/tools/`:
 └── crypto_price.policy.toml   # Security policy (capabilities, limits)
 ```
 
-### Host Capabilities for WASM Tools
+AOT-precompiled `.cwasm` caches live in `.snaga/cache/wasm/`.
 
-WASM tools have no ambient authority. All access goes through capability-gated host imports:
+### Host Capabilities for WASM Tools (21)
 
-| Capability | Function | Details |
-|------------|----------|---------|
-| `file_read` | `read_file(path, offset, limit)` | Absolute paths and symlinks allowed; 10MB max file size |
-| `http_get` | `http_get(url, headers)` | Up to 100 requests per execution; redirects limited to 10 |
-| `http_post` | `http_post(url, body, content_type, headers)` | Same limits as http_get |
-| `kv_store` | `kv_get/set/delete(key)` | 1000 entries, 1MB per value |
+WASM tools have no ambient authority. All access goes through capability-gated host imports. 21 capabilities total — 10 core, 11 hardware/embedded:
+
+**Core (10)**
+
+| Capability | Function | Notes |
+|------------|----------|-------|
+| `file_read` | `read_file(path, offset, limit)` | Absolute paths and symlinks; 10MB max |
+| `file_write` | write paths | Mutating file ops |
+| `http_get` | `http_get(url, headers)` | SSRF-guarded (scheme + private-host + IMDS), re-validated on every 3xx redirect |
+| `http_post` | `http_post(url, body, …)` | Same SSRF guard + redirect re-validation |
+| `kv_store` | `kv_get/set/delete(key)` | Per-tool key-value store |
+| `env_read` | `get_env(name)` | Secret denylist + configurable allowlist (empty = deny all) |
+| `shell_exec` | `shell_exec(cmd, args)` | 15-command allowlist + injection-substring filter on argv |
 | `logging` | `log(level, message)` | Always available |
-| `env_read` | `get_env(name)` | Any environment variable accessible when capability is granted |
-| `shell_exec` | `shell_exec(cmd, args)` | Blocked patterns, timeout, output limits |
+| `telemetry` | metrics emit | Optional |
+| `log_read` | read log lines | Optional |
+
+**Hardware / embedded (11)** — declared and gated; host backends return `not_implemented` until a platform-cfg impl lands:
+
+`gpio`, `i2c`, `spi`, `serial`, `system_info`, `process`, `gps`, `mavlink`, `pwm`, `camera`, `mqtt`
+
+The HTTP capabilities carry an SSRF guard that re-runs on every redirect hop (so an external endpoint can't 302 a tool to `169.254.169.254`); overrides via `SNAGA_WASM_ALLOW_PRIVATE_NETWORK=1` / `SNAGA_WASM_ALLOW_METADATA=1`.
 
 ## Slash Commands
 
