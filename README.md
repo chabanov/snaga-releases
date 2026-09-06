@@ -337,6 +337,7 @@ installable SPECs rather than as always-present built-ins.
 | Category | Tools |
 |----------|-------|
 | **Files** | `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `diff_review`, `undo` |
+| **Code search** | `symbols` — where a name is *declared*, as `path:line`. Escalate `grep` → `symbols` → `@codebase`: exact strings first, declarations second, conceptual questions last |
 | **Git (read-only)** | `git_status`, `git_diff`, `git_log` |
 | **Shell** | `shell` (risk-classified policy, injection detection), `bg_list`, `bg_logs`, `bg_wait`, `bg_kill` |
 | **Web** | `http_request`, `scrape`, `web_search` |
@@ -577,6 +578,14 @@ enabled = true
 command = "cargo check"
 tools = ["edit_file", "write_file"]
 
+# `before_tool_call` observes by default. `blocking = true` makes a
+# non-zero exit REFUSE the call — the only hook point that can, since
+# the other three fire once the work is already done.
+[[hooks.before_tool_call]]
+command = "scripts/deny-writes-outside-repo.sh"
+tools = ["write_file", "edit_file"]
+blocking = true
+
 [[mcp.servers]]
 name = "postgres"
 command = "npx"
@@ -586,6 +595,9 @@ env = { PGPASSWORD = "${PGPASSWORD}" }
 
 Hook points: `before_tool_call`, `after_tool_call`, `on_error`,
 `on_turn_complete`. `tools` narrows a hook to the tools that trigger it.
+
+A failing hook that is not `blocking` is reported and the remaining hooks
+still run — one hook exiting non-zero does not cancel the ones after it.
 
 There is no model selection here. See "The model" above.
 
