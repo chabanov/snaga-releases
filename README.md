@@ -82,13 +82,46 @@ Snaga can construct purpose-specific worker agents at runtime and run independen
 
 Workers can run in-process (shared memory) or in tmux panes (visible). Teams support auto-review and auto-test after coding.
 
-### Distributed Bridge Mode
+### Connect a machine to the web (bridge mode)
 
 ```bash
-snaga serve
+snaga connect          # `snaga serve` is an alias
+snaga connect --json   # status as JSON lines, for scripts
 ```
 
-Multiple Snaga instances on different machines form a cluster via UARP (Unified Agent Runtime Protocol). A Head Agent delegates tasks, workers execute autonomously. Bridge agents poll for tasks, request approval for dangerous operations, and report results.
+`snaga connect` registers this machine as an executor for your account:
+the web (or a Head Agent) sends it tasks, it runs them here with your
+local tools, and every dangerous tool call waits for approval on the web.
+Nothing listens on this machine — the daemon makes outbound connections
+only.
+
+What the wire does today (measured against the production API on
+2026-09-07, `docs/BRIDGE-AUDIT-2026-09-07.md` and the plan next to it):
+
+- **Versioned protocol.** The client declares `protocol_version: 2`; the
+  server answers with the behaviours it has switched on. The banner shows
+  the negotiation: `Protocol: v2 · server v2 · capabilities: cancel,
+  task_states, approval_options, ws_events`. Against an older API every
+  version-2 behaviour stays off.
+- **WebSocket first, HTTP as the fallback — per event.** Tasks are pushed
+  over the socket; events go over it too when the server acknowledges
+  frames, and any single event the socket does not acknowledge within
+  5 s goes over HTTP as the same event. A daemon that fell back to HTTP
+  polling tries the socket again every five minutes.
+- **Cancel from the web stops the machine in under a second** (was: on the
+  next event, 82 s into a `sleep 90`). A pending approval is answered
+  `cancelled` instead of timing out.
+- **Approvals offer four answers** — `allow_once`, `allow_always`,
+  `reject_once`, `reject_always` (the Agent Client Protocol's); an
+  `always` is kept for the session, so a tool asked about once is not
+  asked about again.
+- **A status line** once a minute and on `SIGUSR1`: transport, heartbeat
+  failures, events acked / failed, handshakes, reconnects; the same
+  counters reach the server every five minutes and show in the agent
+  list on the web.
+- **Delegations.** Head-agent delegations auto-approve dangerous tools
+  only when both sides hold `SNAGA_BRIDGE_DELEGATION_KEY`; the banner's
+  `Delegations:` line says which side is missing it and what that means.
 
 ### Enhanced Memory
 
@@ -314,7 +347,7 @@ snaga-tools        40+ native tools (impl Tool for ...)
 snaga-wasm         WASM Component Model runtime (wasmtime + WIT contracts)
 snaga-llm          LLM client layer (Stels/UARP platform, with transparent failover)
 snaga-mcp          Model Context Protocol client + server
-snaga-bridge       Bridge protocol (HMAC-signed delegations, fail-closed approval, JSON-RPC, rate_limit)
+snaga-bridge       Bridge protocol: versioned `{type}` frames over WebSocket + HTTP, HMAC-signed delegations, fail-closed approval, rate_limit
 snaga-browser      Browser automation (Chromium via Chrome DevTools Protocol)
 ```
 
@@ -387,8 +420,9 @@ Created tools are stored in `.snaga/tools/`:
 ### Host Capabilities for WASM Tools
 
 WASM tools have no ambient authority. Every access goes through a
-capability-gated host import. There are **21 capabilities**; ten have working
-host backends today:
+capability-gated host import. There are **21 capabilities**; twelve have working
+host backends today (measured 2026-09-07 — the two below the line used to be
+listed as stubs here while their tests said otherwise):
 
 | Capability | Function | Details |
 |------------|----------|---------|
@@ -402,10 +436,14 @@ host backends today:
 | `telemetry` | counters and timings | |
 | `env_read` | `get_env(name)` | **Not** blanket access: a secret-name denylist plus `policy.env_allowlist`, which is empty by default and therefore denies everything |
 | `shell_exec` | `shell_exec(cmd, args)` | 15-command allowlist, injection-substring filter on argv, timeout, output limits |
+| `system_info` | `get_system_info()` | Host OS, CPU, memory via `sysinfo`; live data, not a stub (`system_info_granted_returns_data`) |
+| `process` | `list_processes()` | Running processes via `sysinfo`; live data (`list_processes_granted_returns_data`) |
 
-The remaining eleven — `gpio`, `i2c`, `spi`, `serial`, `system_info`, `process`,
-`gps`, `mavlink`, `pwm`, `camera`, `mqtt` — are **declared and gated but not
-implemented**. A tool may request them and the capability system will enforce
+The remaining nine — all hardware buses: `gpio`, `i2c`, `spi`, `serial`,
+`pwm`, `camera`, `gps`, `mavlink`, `mqtt` — are **declared and gated but not
+implemented**. Count them with
+`grep -oE 'not_implemented: .[a-z0-9_]+. host import' crates/snaga-wasm/src/capabilities.rs`
+(21 host functions across those nine) rather than trusting this paragraph. A tool may request them and the capability system will enforce
 them, but the host backends return `not_implemented` until platform-specific
 implementations land. Do not plan work on them today.
 
