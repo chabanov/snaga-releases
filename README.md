@@ -138,8 +138,19 @@ See the module-level wiring notes in `crates/snaga-core/src/enhanced_memory/mod.
 
 The `@codebase` context provider indexes the project locally (TF-IDF) and
 retrieves snippets by similarity to the current query, so relevant code reaches
-the model without you naming files. Index updates incrementally; persistence is
-SQLite.
+the model without you naming files.
+
+The index is built on first use per working directory and held in memory for
+the life of the process — three directories at a time. It is rebuilt when any
+file it indexed has changed or gone, checked by `stat` on every lookup.
+
+This paragraph used to say "Index updates incrementally; persistence is
+SQLite". Measured 2026-09-22, all of it was wrong: `IndexWatcher` and
+`run_watcher_task` are never constructed anywhere, `IndexPersistence` has no
+caller outside its own module, and the cache rebuilt only when it was missing
+— so a file edited mid-session was still searched at its old content. The
+staleness check is new; the watcher and the SQLite persistence are still
+unused, and are not claimed here.
 
 The standalone semantic `code_search` tool was removed in the v0.9.9
 slim-kernel cleanup — `@codebase`, `grep` and `glob` are the search surface now.
@@ -222,7 +233,7 @@ The `@codebase <query>` context provider enables natural-language code search:
 
 - TF-IDF local indexing for fast, offline code search
 - File content chunking with overlap for precise matches
-- Incremental index updates as files change
+- Rebuilt when an indexed file changes (`stat` per lookup, not a file watcher)
 - No external API required — runs entirely locally
 
 ### TTL Compaction
@@ -309,7 +320,7 @@ If something goes wrong, `/rewind` restores the working tree to the state before
 
 A new config loader supports advanced project-level configuration:
 
-- **Hooks** — `before_tool_call`, `after_tool_call`, `on_error`, `on_turn_complete` lifecycle hooks
+- **Hooks** — ten lifecycle points: `session_start`, `user_prompt_submit`, `before_model`, `after_model`, `pre_compact`, `before_tool_call`, `after_tool_call`, `on_error`, `on_turn_complete`, `session_end`
 - **MCP servers** — define servers with environment variable interpolation
 - **Agent overrides** — per-agent `model`, `temperature`, `max_rounds` settings
 - **Auto-connect** — MCP servers defined in config are connected automatically on startup
@@ -447,6 +458,78 @@ implemented**. Count them with
 them, but the host backends return `not_implemented` until platform-specific
 implementations land. Do not plan work on them today.
 
+## Worktrees
+
+```bash
+snaga --worktree feature-x
+```
+
+Starts in a git worktree on `snaga-plan/feature-x`, creating it if it is
+new and switching to it if it is not. Every file tool inherits that
+working directory, so edits land on the branch instead of the tree you
+launched from — `/plan diff`, `/plan apply` and `/plan discard` then do
+what they say.
+
+The worktree itself is the `/plan` machinery, which already existed. The
+flag is the missing half: without it you open a session, create the
+plan, and restart to get the isolation you asked for.
+
+`--working-dir` wins if both are given, and a directory that is not a
+git repository exits 2 rather than quietly working in place.
+
+## Review
+
+```bash
+snaga review                        # uncommitted work, staged or not
+snaga review --base origin/main     # what this branch added since main
+snaga review --staged               # what is about to be committed
+snaga --output-format json review   # findings as one object
+```
+
+Exit codes are the point — this is meant to be called by a pre-push hook
+or by CI, not read: **0** nothing found, **1** findings, **2** the review
+could not be done. An unparseable or failed review exits 2 rather than 0,
+because a review that did not happen is not a clean one.
+
+`--base` diffs against the merge base (`ref...HEAD`), so commits other
+people landed on `ref` are not reported as this branch's removals.
+
+## Skill evals
+
+```bash
+snaga eval skill terse              # every case twice: with the skill, and without
+snaga eval skill terse --no-baseline
+snaga --output-format json eval skill terse
+```
+
+A suite lives at `evals/<skill>.toml`:
+
+```toml
+[[case]]
+name = "answers in one word"
+prompt = "What is the capital of France?"
+
+[[case.grader]]
+kind = "contains"          # contains | not_contains | tool_called | tool_not_called
+pattern = "(?i)^\\s*paris\\s*$"
+```
+
+**The baseline is the point.** A case that passes with the skill and
+without it says nothing about the skill; the report prints both scores
+and the difference, so a suite that is really measuring the model rather
+than the skill is visible rather than flattering. With `--no-baseline`
+the report says the contribution is unmeasured instead of printing a
+delta of zero.
+
+Exits 1 when any grader fails with the skill active, 2 when the suite is
+missing or malformed. A case with no graders, or a pattern that does not
+compile, is refused at load — both would raise the score while measuring
+nothing.
+
+Graders are deterministic on purpose. A rubric judged by a second model
+is not offered: its own accuracy is unmeasured, and sitting it beside
+checks a reader can verify invites trusting all of them equally.
+
 ## Slash Commands
 
 Type `/` on an empty prompt to open the interactive picker (arrow-key navigation, fuzzy filter, sub-menu drill-down). All commands also work as plain text input.
@@ -459,13 +542,16 @@ Type `/` on an empty prompt to open the interactive picker (arrow-key navigation
 | `/tools` | List available agent tools |
 | `/skills` | Manage skills — sub-commands: `list`, `show`, `activate`, `deactivate`, `create`, `edit`, `delete`, `reload`, `install` |
 | `/model` | Reports that the model is platform-managed. There is nothing to set. |
-| `/tokens` | Show conversation token usage |
+| `/tokens` | Show conversation token usage and session cost |
+| `/context` | Context budget, when compaction triggers, and **where the context went** — a breakdown by source, with each tool named |
 | `/compact` | Compress conversation to reduce tokens |
 | `/save` | Save the session to a file |
 | `/load` | Resume a saved session checkpoint |
 | `/rebuild` | Rebuild and restart Snaga from source |
-| `/memory` | Manage project memory — sub-commands: `init`, `show`, `update` |
-| `/background` | Manage background tasks — sub-commands: `list`, `status`, `cancel` |
+| `/memory` | Manage project memory — sub-commands: `init`, `show`, `update`, `inbox` |
+| `/memory inbox` | Review what passive extraction proposed: `accept <key>\|all`, `reject <key>\|all`. Nothing is recalled until accepted |
+| `/agents` | Everything running in the background, grouped by state: needs you / running / done. Covers workers, monitors and detached shell processes. `/tasks` and `/background` are aliases for the listing |
+| `/background` | `run <task>` starts a worker; `status`/`cancel <id>` act on one. Bare `/background` opens `/agents` |
 | `/map` | Display repository structure |
 | `/test` | Run tests with auto-fix |
 | `/mcp` | Connect to MCP servers — sub-commands: `connect`, `list` |
@@ -508,10 +594,8 @@ Streaming, tool calling and transparent failover to a backup are handled for
 you; when a failover happens the session says so without naming what it
 switched to.
 
-Self-hosted deployments that genuinely need a different endpoint can build with
-`cargo build --features custom-endpoint`, which restores `--base-url` and the
-custom-provider registry. It is a build-time feature rather than a runtime flag
-on purpose — a runtime flag is a bypass anyone can reach.
+There is no build that does otherwise: local providers (Ollama, LM Studio) and
+custom endpoints are not in the code.
 
 ## Installation
 
@@ -599,19 +683,50 @@ has ever recognised, and showed hooks as bare strings, which is not their shape.
 max_rounds = 20
 temperature = 0.7
 
+[agent]
+# Ceiling on one delegated worker's LLM call. Default 600 — raise it for
+# a decomposition whose steps are long.
+worker_call_timeout_secs = 900
+
+# Parsed and inert. Memory is initialised on every run that is not
+# `--fast`, and none of these toggles is read — verified 2026-09-22:
+# nothing in the CLI reads `snaga_config.memory` at all. They are kept
+# for forward compatibility, and shown here so the shape is right when
+# they start working, not because setting them does anything.
+#
+# `enabled = false` in particular does NOT turn memory off, which is the
+# reading that matters: it looks like a switch and is not one. The flag
+# that does turn it off is `--fast`.
 [memory]
 enabled = true
 playbook = true
 reflection = true
 
 [permissions]
-auto_approve = ["read_file", "grep", "glob"]
-deny = ["rm_all"]
+# `--permission-mode auto` sits between asking about everything and
+# `--yolo`: it also approves, with no prompt, a path inside the working
+# directory and a command the shell guard accepts while a sandbox is
+# active. Everything else still asks, and a `deny` rule outranks it.
+#
+# An entry is a bare tool name, or `tool(glob)` to match the call's
+# principal argument — the command for `shell`, the path for the file
+# tools. A matching `deny` outranks every `auto_approve`, and outranks
+# `--yolo` too: the approval callback is never reached.
+auto_approve = ["read_file", "grep", "glob", "shell(git status*)"]
+deny = ["rm_all", "write_file(/etc/**)"]
 
 [hooks]
 enabled = true
 
 # An array of tables, one per hook — NOT `after_tool_call = "cmd"`.
+#
+# `tools` is an exact list and `matcher` a regex over the tool name;
+# given both, both must pass. A hook may print a JSON object on stdout:
+#   {"decision": "block", "reason": "..."}   refuse the call
+#   {"additional_context": "..."}            add a note to the result
+# `decision` is honoured only on a `before_tool_call` entry declared
+# `blocking = true`, so which hooks can refuse a call stays readable
+# from this file. Anything else a hook prints is ignored.
 [[hooks.after_tool_call]]
 command = "cargo check"
 tools = ["edit_file", "write_file"]
@@ -631,8 +746,41 @@ args = ["@modelcontextprotocol/server-postgres"]
 env = { PGPASSWORD = "${PGPASSWORD}" }
 ```
 
-Hook points: `before_tool_call`, `after_tool_call`, `on_error`,
-`on_turn_complete`. `tools` narrows a hook to the tools that trigger it.
+Hook points, in firing order: `session_start`, `user_prompt_submit`,
+`before_model`, `after_model`, `pre_compact`, `before_tool_call`,
+`after_tool_call`, `on_error`, `on_turn_complete`, `session_end`.
+
+`before_model` and `after_model` fire **every round**, not every turn: a
+turn that calls five tools makes six model calls. That is a subprocess
+per call — opt-in, since a point with no hooks does nothing, but worth
+knowing before you write one.
+`pre_compact` is the last moment to keep what compaction is about to
+summarise away — afterwards only the summary remains.
+
+`session_end` runs when the session ends **normally**. It runs from a
+drop guard, so it covers every path that returns and none that aborts
+the process — the same coverage an `atexit` handler has. Write one that
+can be skipped. `tools` narrows a hook to the tools that
+trigger it, `matcher` is a regex over the tool name, and both must pass
+when both are given.
+
+Three of the points run **before** the work they could stop, and only
+those three honour `blocking` and `{"decision":"block"}`:
+`session_start` refuses the session outright, `user_prompt_submit`
+refuses one turn before the model is called, `before_tool_call` refuses
+one tool call. A refusal names which point it came from. `blocking` anywhere else is inert, and `/hooks`
+prints it as such.
+
+`{"additional_context":"…"}` is carried by four points:
+`session_start`, `user_prompt_submit`, `before_tool_call` and
+`after_tool_call`. Offered anywhere else it reaches nothing, and the
+runner says so rather than accepting it in silence. At `session_start`
+it becomes a system message for the whole session — context that should
+still be there twenty turns later. At `user_prompt_submit` it is
+prepended to the prompt — background is read
+before the request it is background for — and elsewhere it is appended to
+the tool result. Either way it is labelled `[hook context]`, so a hook
+cannot put words in the user's mouth or forge tool output.
 
 A failing hook that is not `blocking` is reported and the remaining hooks
 still run — one hook exiting non-zero does not cancel the ones after it.
