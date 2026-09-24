@@ -458,6 +458,35 @@ implemented**. Count them with
 them, but the host backends return `not_implemented` until platform-specific
 implementations land. Do not plan work on them today.
 
+### Granting what a tool requests
+
+A manifest may put only `logging`, `kv_store` and `env_read` in
+`capabilities_granted`; `snaga spec install` rejects anything else there,
+`file_read` included. Everything else goes in `capabilities_requested` with
+a `reason`, and the operator grants it — at the prompt when the tool asks,
+or ahead of time:
+
+```bash
+snaga permissions policy add @local/probe --cap http_get --scope 'api.example.com'
+snaga permissions policy add @local/probe --any-cap --scope '**'   # any target
+snaga permissions policy list                                       # prints the file it read
+```
+
+Rules live in `permissions.toml` in the platform config directory
+(`dirs::config_dir()`): `~/.config/snaga/permissions.toml` on Linux
+(`$XDG_CONFIG_HOME` is honoured), `~/Library/Application
+Support/snaga/permissions.toml` on macOS, `%APPDATA%\snaga\permissions.toml`
+on Windows.
+
+A scope is a closed allowlist. `*` or `**` alone means any target. Otherwise:
+hosts (`api.example.com`, `*.example.com`) or URLs
+(`https://api.example.com/v1/**`) for `http_get`/`http_post`; paths,
+absolute or relative to the working directory, with an optional trailing
+`*` (one level) or `**` (recursive) for `file_read`/`file_write` — matched
+after `..` is folded, so `src/../secret` is not inside `src/**`; exact
+command prefixes (`git status`) for `shell_exec`. `policy add` refuses a
+pattern that can never match, and says why.
+
 ## Worktrees
 
 ```bash
